@@ -1,7 +1,11 @@
 use eframe::egui::{self, FontData, FontDefinitions};
-use rust_decimal::Decimal;
+use rust_decimal::{Decimal, RoundingStrategy};
 use rust_decimal_macros::dec;
-use std::str::FromStr;
+use std::{
+    array, cmp,
+    fmt::{self, Display},
+    str::FromStr,
+};
 
 const MAX: Decimal = dec!(1000000000000.000000);
 const MIN: Decimal = dec!(-1000000000000.000000);
@@ -16,7 +20,7 @@ fn main() {
     );
 }
 
-#[derive(Copy, Clone, PartialEq, Eq)]
+#[derive(Copy, Clone, PartialEq, Eq, Debug)]
 enum Op {
     Add,
     Sub,
@@ -24,10 +28,43 @@ enum Op {
     Div,
 }
 
+impl PartialOrd for Op {
+    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
+        Some(match (self, other) {
+            (Op::Add, Op::Mul) => cmp::Ordering::Less,
+            (Op::Add, Op::Div) => cmp::Ordering::Less,
+            (Op::Sub, Op::Mul) => cmp::Ordering::Less,
+            (Op::Sub, Op::Div) => cmp::Ordering::Less,
+            (Op::Mul, Op::Add) => cmp::Ordering::Greater,
+            (Op::Mul, Op::Sub) => cmp::Ordering::Greater,
+            (Op::Div, Op::Add) => cmp::Ordering::Greater,
+            (Op::Div, Op::Sub) => cmp::Ordering::Greater,
+            _ => cmp::Ordering::Equal,
+        })
+    }
+}
+
+impl Ord for Op {
+    fn cmp(&self, other: &Self) -> cmp::Ordering {
+        self.partial_cmp(other).unwrap()
+    }
+}
+
+impl Display for Op {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Op::Add => f.write_str("+"),
+            Op::Sub => f.write_str("-"),
+            Op::Mul => f.write_str("*"),
+            Op::Div => f.write_str("/"),
+        }
+    }
+}
+
 struct App {
-    lhs: (Decimal, String),
-    rhs: (Decimal, String),
-    op: Op,
+    operands: [(Decimal, String); 4],
+    ops: [Op; 3],
+    rounding_strategy: RoundingStrategy,
 }
 
 impl App {
@@ -43,12 +80,12 @@ impl App {
             .or_default()
             .insert(0, "stalinist".to_owned());
         cc.egui_ctx.set_fonts(fonts);
-        let default = dec!(100000000000.000000);
+        let default = dec!(0.000000);
         let default_string = format_with_spaces(&default.to_string());
         Self {
-            lhs: (default, default_string.clone()),
-            rhs: (default, default_string),
-            op: Op::Add,
+            operands: array::from_fn(|_| (default.clone(), default_string.clone())),
+            ops: [Op::Add; 3],
+            rounding_strategy: RoundingStrategy::MidpointAwayFromZero,
         }
     }
 }
@@ -56,49 +93,70 @@ impl App {
 impl eframe::App for App {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         egui::CentralPanel::default().show(ctx, |ui| {
-            ui.vertical_centered(|ui| {
-                ui.heading("Гельманов Артур Русланович");
-                ui.heading("4 курс 4 группа 2022");
-                let mut input = |operand: &mut (Decimal, String)| -> Result<(), ()> {
-                    ui.text_edit_singleline(&mut operand.1);
-                    if let Err(err) = check_spaces(&operand.1) {
-                        ui.label(err);
-                        Err(())
-                    } else {
-                        let normalized = operand.1.replace(',', ".").replace(' ', "");
+            ui.heading("Гельманов Артур Русланович");
+            ui.heading("4 курс 4 группа 2022");
+            let mut input = |index: usize| -> Result<(), ()> {
+                ui.text_edit_singleline(&mut self.operands[index].1);
+                let result = if let Err(err) = check_spaces(&self.operands[index].1) {
+                    ui.label(err);
+                    Err(())
+                } else {
+                    let normalized = self.operands[index].1.replace(',', ".").replace(' ', "");
 
-                        if let Ok(value) = Decimal::from_str(&normalized) {
-                            if let Err(err) = check_limits(&value, &normalized) {
-                                ui.label(err);
-                                Err(())
-                            } else {
-                                operand.0 = value;
-                                Ok(())
-                            }
-                        } else {
-                            ui.label("возмутительный ввод");
+                    if let Ok(value) = Decimal::from_str(&normalized) {
+                        if let Err(err) = check_limits(&value, &normalized) {
+                            ui.label(err);
                             Err(())
+                        } else {
+                            self.operands[index].0 = value;
+                            Ok(())
                         }
+                    } else {
+                        ui.label("возмутительный ввод");
+                        Err(())
                     }
                 };
+                if result.is_ok() && index < self.ops.len() {
+                    ui.push_id(index + 1000, |ui| {
+                        egui::ComboBox::from_label("")
+                            .selected_text(format!("{}", self.ops[index]))
+                            .show_ui(ui, |ui| {
+                                for op in [Op::Add, Op::Sub, Op::Mul, Op::Div] {
+                                    ui.selectable_value(&mut self.ops[index], op, op.to_string());
+                                }
+                            });
+                    });
+                }
+                result
+            };
 
-                if input(&mut self.lhs).is_ok() && input(&mut self.rhs).is_ok() {
-                    if ui.small_button("+").clicked() {
-                        self.op = Op::Add;
-                    } else if ui.small_button("-").clicked() {
-                        self.op = Op::Sub;
-                    } else if ui.small_button("*").clicked() {
-                        self.op = Op::Mul;
-                    } else if ui.small_button("/").clicked() {
-                        self.op = Op::Div;
+            if input(0).is_ok() && input(1).is_ok() && input(2).is_ok() && input(3).is_ok() {
+                let mut execute = |lhs: Decimal, rhs: Decimal, op| match op {
+                    Op::Add => Some(lhs + rhs),
+                    Op::Sub => Some(lhs - rhs),
+                    Op::Mul => Some(lhs * rhs),
+                    Op::Div => {
+                        let result = lhs.checked_div(rhs);
+                        if result.is_none() {
+                            ui.label("деление на ноль");
+                        }
+                        result
                     }
-
-                    if let Some(output) = match self.op {
-                        Op::Add => Some(self.lhs.0 + self.rhs.0),
-                        Op::Sub => Some(self.lhs.0 - self.rhs.0),
-                        Op::Mul => Some(self.lhs.0 * self.rhs.0),
-                        Op::Div => self.lhs.0.checked_div(self.rhs.0).map(|x| x.round_dp(6)),
-                    } {
+                };
+                if let Some(mut y) = execute(self.operands[1].0, self.operands[2].0, self.ops[1]) {
+                    y = mathematical_round(10, &y);
+                    if let Some(mut output) = if self.ops[2] > self.ops[0] {
+                        execute(y, self.operands[3].0, self.ops[2]).map(|z| {
+                            execute(self.operands[0].0, mathematical_round(10, &z), self.ops[0])
+                        })
+                    } else {
+                        execute(self.operands[0].0, y, self.ops[0]).map(|x| {
+                            execute(mathematical_round(10, &x), self.operands[3].0, self.ops[2])
+                        })
+                    }
+                    .flatten()
+                    {
+                        output = mathematical_round(6, &output);
                         let output_string = output.to_string();
 
                         if let Err(err) = check_limits(&output, &output_string) {
@@ -106,13 +164,46 @@ impl eframe::App for App {
                         } else {
                             ui.label(&format_with_spaces(&output_string));
                         }
-                    } else {
-                        ui.label("деление на ноль");
+
+                        ui.push_id(100000, |ui| {
+                            egui::ComboBox::from_label("округление")
+                                .selected_text(rounding_strategy_to_str(self.rounding_strategy))
+                                .show_ui(ui, |ui| {
+                                    for s in [
+                                        RoundingStrategy::MidpointNearestEven,
+                                        RoundingStrategy::MidpointAwayFromZero,
+                                        RoundingStrategy::ToZero,
+                                    ] {
+                                        ui.selectable_value(
+                                            &mut self.rounding_strategy,
+                                            s,
+                                            rounding_strategy_to_str(s),
+                                        );
+                                    }
+                                });
+                        });
+
+                        let rounded_output =
+                            output.round_dp_with_strategy(0, self.rounding_strategy);
+                        ui.label(&format_with_spaces(&rounded_output.to_string()));
                     }
-                };
-            });
+                }
+            };
         });
     }
+}
+
+fn rounding_strategy_to_str(s: RoundingStrategy) -> &'static str {
+    match s {
+        RoundingStrategy::MidpointNearestEven => "бухгалтерское",
+        RoundingStrategy::MidpointAwayFromZero => "математическое",
+        RoundingStrategy::ToZero => "усечение",
+        _ => unreachable!(),
+    }
+}
+
+fn mathematical_round(dp: u32, x: &Decimal) -> Decimal {
+    x.round_dp_with_strategy(dp, RoundingStrategy::MidpointAwayFromZero)
 }
 
 fn check_limits(x: &Decimal, s: &str) -> Result<(), &'static str> {
