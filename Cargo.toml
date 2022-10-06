@@ -1,0 +1,10 @@
+[package]
+name = "calculator"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+eframe = "0.19"
+rust_decimal = "1.26"
+rust_decimal_macros = "1.26"
+lazy_static = "1.4"
